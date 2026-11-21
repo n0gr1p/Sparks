@@ -81,6 +81,7 @@ local gil = GilRunner.new({
     windower = windower,
     packets = packets,
     validate = function() return validate('acheron shield') end,
+    shield_cost = db[12385].Cost,
     log = function(message, color) windower.add_to_chat(color, message) end,
     on_finish = function() busy = false end,
 })
