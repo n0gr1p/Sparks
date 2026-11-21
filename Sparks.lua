@@ -2,7 +2,7 @@ _addon.name = 'Sparks'
 
 _addon.author = 'Brax(orig) - Sammeh Modified - v 2.0.0.2'
 
-_addon.version = '2.0.0.2'
+_addon.version = '2.1.0'
 
 _addon.command = 'sparks'
 
@@ -74,8 +74,20 @@ settings = config.load(defaults)
 
 busy = false
 
+-- Gil runs in a non-blocking, client-local transaction state machine.
+-- The original buy/buyall/buyki commands retain their existing behavior.
+local GilRunner = require('gil_runner')
+local gil = GilRunner.new({
+    windower = windower,
+    packets = packets,
+    validate = function() return validate('acheron shield') end,
+    log = function(message, color) windower.add_to_chat(color, message) end,
+    on_finish = function() busy = false end,
+})
 
-
+windower.register_event('prerender', function()
+    gil:tick()
+end)
 
 windower.register_event('addon command', function(...)
 	local args = T { ... }
@@ -83,6 +95,34 @@ windower.register_event('addon command', function(...)
 	args:remove(1)
 	for i, v in pairs(args) do args[i] = windower.convert_auto_trans(args[i]) end
 	local item = table.concat(args, " "):lower()
+
+    if gil:is_active() and cmd ~= 'status' and cmd ~= 'stop' and cmd ~= 'reset' then
+        windower.add_to_chat(2, '[Sparks] Gil run is active. Use //sparks status or //sparks stop.')
+        return
+    end
+
+    if cmd == 'gil' then
+        if not busy and gil:start(args[1]) then
+            busy = true
+        elseif busy then
+            windower.add_to_chat(2, '[Sparks] Another transaction is still active.')
+        end
+        return
+    elseif cmd == 'status' then
+        gil:status()
+        return
+    elseif cmd == 'stop' then
+        gil:cancel()
+        return
+    elseif cmd == 'reset' then
+        if gil:is_active() then
+            gil:cancel()
+        else
+            reset_me()
+        end
+        return
+    end
+
 	ki = 0
 	if cmd == 'buy' then
 		if not busy then
@@ -96,29 +136,6 @@ windower.register_event('addon command', function(...)
 			end
 		else
 			windower.add_to_chat(2, "Still buying last item")
-		end
-	elseif cmd == 'gil' then
-		for i = 1, 38, 1 do
-			if not busy then
-				pkt = validate('acheron shield')
-				if pkt then
-					busy = true
-					--print(pkt['Target'].."-"..pkt['Target Index'])
-					poke_npc(pkt['Target'], pkt['Target Index'])
-				else
-					windower.add_to_chat(2, "Can't find item in menu")
-				end
-			else
-				windower.add_to_chat(2, "Still buying last item")
-			end
-			sleepcounter = 0
-			while busy and sleepcounter < 5 do
-				coroutine.sleep(1)
-				sleepcounter = sleepcounter + 1
-				if sleepcounter == "4" then
-					windower.add_to_chat(2, "Probably lost a packet, waited too long!")
-				end
-			end
 		end
 	elseif cmd == 'buyall' then
 		local currentzone = windower.ffxi.get_info()['zone']
@@ -252,8 +269,6 @@ windower.register_event('addon command', function(...)
 			windower.add_to_chat(8, "Tribulens: Check")
 		end
 
-	elseif cmd == 'reset' then
-		reset_me()
 	elseif cmd == 'buyallki' then
 		local currentzone = windower.ffxi.get_info()['zone']
 		if currentzone == 291 or currentzone == 289 or currentzone == 288 then
@@ -321,7 +336,7 @@ function validate(item)
 			end
 		end
 
-		if math.sqrt(distance) < 6 then
+		if distance and math.sqrt(distance) < 6 then
 			local ite = fetch_db(item)
 			if ite then
 				result['Target'] = target_id
@@ -331,7 +346,7 @@ function validate(item)
 				result['Zone'] = zone
 			end
 		else
-			windower.add_to_chat(10, "Too far from npc")
+            windower.add_to_chat(10, distance and 'Too far from npc' or 'Sparks NPC not found nearby')
 		end
 	else
 		windower.add_to_chat(10, "Not in a zone with sparks npc")
@@ -425,6 +440,12 @@ function find_missing_ki()
 end
 
 windower.register_event('incoming chunk', function(id, data, modified, injected, blocked)
+
+    -- Only consume a menu response when it matches the NPC and menu opened
+    -- by this client's active gil transaction. Never swallow unrelated menus.
+    if gil:is_active() then
+        return gil:on_incoming(id, data, injected, blocked)
+    end
 
 	if id == 0x034 or id == 0x032 then
 
@@ -520,6 +541,10 @@ windower.register_event('incoming chunk', function(id, data, modified, injected,
 end)
 
 function reset_me()
+    if not lastpkt or not lastpkt['Target'] then
+        windower.add_to_chat(2, '[Sparks] No previous NPC menu to reset.')
+        return
+    end
 	local packet = packets.new('outgoing', 0x05B)
 	packet["Target"] = lastpkt['Target']
 	packet["Option Index"] = lastpkt['Option Index']
@@ -564,6 +589,14 @@ end
 
 windower.register_event('load', function()
 	find_all_tempitems()
+end)
+
+windower.register_event('logout', function()
+    if gil:is_active() then gil:cancel() end
+end)
+
+windower.register_event('unload', function()
+    if gil:is_active() then gil:cancel() end
 end)
 
 
