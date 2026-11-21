@@ -2,7 +2,7 @@ _addon.name = 'Sparks'
 
 _addon.author = 'Brax(orig) - Sammeh Modified - v 2.0.0.2'
 
-_addon.version = '2.1.0'
+_addon.version = '2.2.0'
 
 _addon.command = 'sparks'
 
@@ -77,6 +77,7 @@ busy = false
 -- Gil runs in a non-blocking, client-local transaction state machine.
 -- The original buy/buyall/buyki commands retain their existing behavior.
 local GilRunner = require('gil_runner')
+local PowderRunner = require('powder_runner')
 local gil = GilRunner.new({
     windower = windower,
     packets = packets,
@@ -86,8 +87,16 @@ local gil = GilRunner.new({
     on_finish = function() busy = false end,
 })
 
+local powder = PowderRunner.new({
+    windower = windower,
+    packets = packets,
+    log = function(message, color) windower.add_to_chat(color, message) end,
+    on_finish = function() busy = false end,
+})
+
 windower.register_event('prerender', function()
     gil:tick()
+    powder:tick()
 end)
 
 windower.register_event('addon command', function(...)
@@ -97,12 +106,20 @@ windower.register_event('addon command', function(...)
 	for i, v in pairs(args) do args[i] = windower.convert_auto_trans(args[i]) end
 	local item = table.concat(args, " "):lower()
 
-    if gil:is_active() and cmd ~= 'status' and cmd ~= 'stop' and cmd ~= 'reset' then
-        windower.add_to_chat(2, '[Sparks] Gil run is active. Use //sparks status or //sparks stop.')
+    if (gil:is_active() or powder:is_active())
+        and cmd ~= 'status' and cmd ~= 'stop' and cmd ~= 'reset' then
+        windower.add_to_chat(2, '[Sparks] A purchase run is active. Use //sparks status or //sparks stop.')
         return
     end
 
-    if cmd == 'gil' then
+    if cmd == 'powder' then
+        if not busy and powder:start(args[1]) then
+            busy = true
+        elseif busy then
+            windower.add_to_chat(2, '[Sparks] Another transaction is still active.')
+        end
+        return
+    elseif cmd == 'gil' then
         if not busy and gil:start(args[1]) then
             busy = true
         elseif busy then
@@ -110,13 +127,15 @@ windower.register_event('addon command', function(...)
         end
         return
     elseif cmd == 'status' then
-        gil:status()
+        if powder:is_active() then powder:status() else gil:status() end
         return
     elseif cmd == 'stop' then
-        gil:cancel()
+        if powder:is_active() then powder:cancel() else gil:cancel() end
         return
     elseif cmd == 'reset' then
-        if gil:is_active() then
+        if powder:is_active() then
+            powder:cancel()
+        elseif gil:is_active() then
             gil:cancel()
         else
             reset_me()
@@ -447,6 +466,9 @@ windower.register_event('incoming chunk', function(id, data, modified, injected,
     if gil:is_active() then
         return gil:on_incoming(id, data, injected, blocked)
     end
+    if powder:is_active() then
+        return powder:on_incoming(id, data, injected, blocked)
+    end
 
 	if id == 0x034 or id == 0x032 then
 
@@ -594,10 +616,12 @@ end)
 
 windower.register_event('logout', function()
     if gil:is_active() then gil:cancel() end
+    if powder:is_active() then powder:cancel() end
 end)
 
 windower.register_event('unload', function()
     if gil:is_active() then gil:cancel() end
+    if powder:is_active() then powder:cancel() end
 end)
 
 
