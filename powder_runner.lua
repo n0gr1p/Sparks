@@ -227,6 +227,7 @@ function Runner:start(requested)
     self.menu_id = nil
     self.menu_closed = false
     self.target = nil
+    self.last_05c_header = nil
     self.last_result = 'active'
 
     local name = (self.windower.ffxi.get_player() or {}).name or ''
@@ -325,6 +326,18 @@ function Runner:on_incoming(id, data, injected, blocked)
             self:_finish('Failed to enter Unity item shop: ' .. tostring(err), false)
         end
         return true
+    end
+
+    -- A duplicated 0x05C must not advance two stages of Unity dialogue.
+    -- Windower packet sequence occupies bytes 3-4 of the raw packet.
+    -- Unlike a timer, this protects against immediately replayed packets.
+    if id == 0x05C and (self.phase == 'waiting_item_menu'
+        or self.phase == 'waiting_quantity_menu') and type(data) == 'string' then
+        local header = data:sub(1, 4)
+        if #header < 4 or header == self.last_05c_header then
+            return nil
+        end
+        self.last_05c_header = header
     end
 
     if id == 0x05C and self.phase == 'waiting_item_menu' then
