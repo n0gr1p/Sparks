@@ -173,6 +173,22 @@ do
     assert(count(e,0x05B,10)==0)
 end
 
+-- Repeated 0x05C with the same packet sequence must not skip a menu step.
+do
+    local r,e=mock()
+    assert(r:start(1))
+    poke(r,e)
+    menu(r,e)
+    local first=string.char(92, 4, 12, 77) .. string.rep(string.char(0),32)
+    local second=string.char(92, 4, 13, 77) .. string.rep(string.char(0),32)
+    assert(r:on_incoming(0x05C,first,false,false)==true)
+    assert(r.phase=='waiting_quantity_menu')
+    assert(r:on_incoming(0x05C,first,false,false)==nil)
+    assert(r.phase=='waiting_quantity_menu')
+    assert(r:on_incoming(0x05C,second,false,false)==true)
+    assert(r.phase=='waiting_delivery')
+end
+
 -- Lost menu is retried at most three times, and releases the client.
 do
     local r,e=mock()
