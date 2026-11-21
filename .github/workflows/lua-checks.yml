@@ -12,6 +12,9 @@ jobs:
       - name: Install Lua 5.1
         run: sudo apt-get update && sudo apt-get install -y lua5.1
       - name: Check Lua syntax
-        run: luac5.1 -p Sparks.lua gil_runner.lua map.lua tests/gil_runner_test.lua
+        run: luac5.1 -p Sparks.lua gil_runner.lua powder_runner.lua map.lua tests/gil_runner_test.lua tests/powder_runner_test.lua
       - name: Test Sparks gil state machine
         run: lua5.1 tests/gil_runner_test.lua
+
+      - name: Test Unity Prize Powder transactions
+        run: lua5.1 tests/powder_runner_test.lua
