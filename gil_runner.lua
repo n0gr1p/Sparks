@@ -5,7 +5,7 @@ local Runner = {}
 Runner.__index = Runner
 
 local SHIELD_ID = 12385
-local MAX_PURCHASES = 38
+local MAX_PURCHASES = 38 -- Explicit-count mode only; bare gil has no count limit.
 local MENU_TIMEOUT = 5
 local ITEM_TIMEOUT = 8
 local RETRY_DELAY = 2
@@ -19,12 +19,15 @@ function Runner.new(deps)
         packets = assert(deps.packets),
         validate = assert(deps.validate),
         log = assert(deps.log),
+        shield_cost = assert(deps.shield_cost),
+        read_sparks = deps.read_sparks,
         on_finish = deps.on_finish,
         clock = deps.clock or os.time,
         active = false,
         phase = 'idle',
         completed = 0,
         requested = 0,
+        auto = false,
         attempts = 0,
         last_result = 'not started',
     }, Runner)
@@ -36,6 +39,31 @@ end
 
 function Runner:_say(message, color)
     self.log('[Sparks gil] ' .. message, color or 8)
+end
+
+-- A city Sparks NPC's 0x034 menu contains the live Sparks balance as a
+-- little-endian uint32 at bytes 13-16 (Windower's raw offset 13).
+-- Do not assume 0x032 has the same layout, and never guess a balance.
+function Runner:_sparks_from_menu(id, data)
+    if self.read_sparks then
+        return self.read_sparks(id, data)
+    end
+    if id ~= 0x034 or type(data) ~= 'string' or #data < 16 then
+        return nil
+    end
+    local b1, b2, b3, b4 = string.byte(data, 13, 16)
+    local balance = b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
+    if balance < 0 or balance > 999999 then
+        return nil
+    end
+    return balance
+end
+
+function Runner:_progress()
+    if self.auto then
+        return tostring(self.completed) .. ' shields'
+    end
+    return tostring(self.completed) .. '/' .. tostring(self.requested) .. ' shields'
 end
 
 function Runner:_stock()
@@ -119,7 +147,7 @@ function Runner:_finish(reason, successful)
     if self.on_finish then
         self.on_finish(successful == true)
     end
-    self:_say(string.format('%s (%d/%d confirmed).', reason, self.completed, self.requested),
+    self:_say(reason .. ' (' .. self:_progress() .. ' confirmed).',
         successful and 8 or 2)
 end
 
@@ -133,8 +161,9 @@ end
 
 function Runner:status()
     if self.active then
-        self:_say(string.format('Running: %d/%d confirmed, phase=%s, menu attempts=%d.',
-            self.completed, self.requested, self.phase, self.attempts))
+        self:_say(string.format('Running: %s confirmed, mode=%s, phase=%s, menu attempts=%d.',
+            self:_progress(), self.auto and 'until unaffordable' or 'fixed count',
+            self.phase, self.attempts))
     else
         self:_say('Idle. Last result: ' .. self.last_result)
     end
@@ -146,9 +175,10 @@ function Runner:start(amount)
         return false
     end
 
-    local n = amount == nil and MAX_PURCHASES or tonumber(amount)
-    if not n or n < 1 or n > MAX_PURCHASES or n ~= math.floor(n) then
-        self:_say('Usage: //sparks gil [1-38]', 2)
+    local auto = amount == nil
+    local n = not auto and tonumber(amount) or nil
+    if not auto and (not n or n < 1 or n > MAX_PURCHASES or n ~= math.floor(n)) then
+        self:_say('Usage: //sparks gil (until unaffordable) or //sparks gil [1-38]', 2)
         return false
     end
 
@@ -171,7 +201,9 @@ function Runner:start(amount)
     self.active = true
     self.phase = 'cooldown'
     self.completed = 0
+    self.auto = auto
     self.requested = n
+    self.last_sparks = nil
     self.attempts = 0
     self.menu = nil
     self.target = nil
@@ -185,7 +217,12 @@ function Runner:start(amount)
     end
     local stagger = hash % 3
     self.next_at = self.clock() + stagger
-    self:_say(string.format('Starting up to %d shields; first request in %ds.', n, stagger))
+    if auto then
+        self:_say(string.format('Purchasing until Sparks fall below %d; first request in %ds.',
+            self.shield_cost, stagger))
+    else
+        self:_say(string.format('Starting up to %d shields; first request in %ds.', n, stagger))
+    end
     return true
 end
 
@@ -263,6 +300,20 @@ function Runner:on_incoming(id, data, injected, blocked)
         return true
     end
 
+    local sparks = self:_sparks_from_menu(id, data)
+    if sparks == nil and self.auto then
+        self:_finish('Cannot verify current Sparks from NPC menu; no purchase sent', false)
+        return true
+    end
+    if sparks ~= nil then
+        self.last_sparks = sparks
+        if sparks < self.shield_cost then
+            self:_finish(string.format('Cannot afford another Acheron Shield (%d Sparks left; cost %d)',
+                sparks, self.shield_cost), true)
+            return true
+        end
+    end
+
     -- One purchase request only. A timeout *after this point* is ambiguous:
     -- never resend without a confirmed Inventory delta.
     self.phase = 'waiting_item'
@@ -326,10 +377,10 @@ function Runner:tick()
             self.completed = self.completed + 1
             self.menu = nil
             self.attempts = 0
-            if self.completed % 5 == 0 or self.completed == self.requested then
-                self:_say(string.format('Confirmed %d/%d shields.', self.completed, self.requested))
+            if self.completed % 5 == 0 or (not self.auto and self.completed == self.requested) then
+                self:_say(string.format('Confirmed %s.', self:_progress()))
             end
-            if self.completed >= self.requested then
+            if not self.auto and self.completed >= self.requested then
                 self:_finish('Done', true)
             else
                 self.phase = 'cooldown'
