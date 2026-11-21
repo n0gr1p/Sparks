@@ -7,6 +7,7 @@ local function mock(name)
     local env = {
         now = 100,
         shields = 0,
+        sparks = 99999,
         used = 10,
         zone = 230,
         sent = {},
@@ -48,6 +49,11 @@ local function mock(name)
         windower = windower,
         packets = packets,
         clock = function() return env.now end,
+        shield_cost = 2755,
+        read_sparks = function(id)
+            if id == 0x034 then return env.sparks end
+            return nil
+        end,
         validate = function()
             return {
                 ['Target'] = 123,
@@ -178,6 +184,104 @@ do
     assert(menu(a) == true)
     assert(b:is_active() and b.completed == 0)
     assert(count_packet(be, 0x05B, 9) == 0)
+end
+
+
+-- The production reader uses bytes 13-16 of the 0x034 NPC menu, not
+-- the currency from an old packet or a fixed purchase count.
+do
+    local r = mock()
+    r.read_sparks = nil
+    local raw = string.rep(string.char(0), 12) .. string.char(195, 10, 0, 0)
+    assert(r:_sparks_from_menu(0x034, raw) == 2755)
+    assert(r:_sparks_from_menu(0x032, raw) == nil)
+    assert(r:_sparks_from_menu(0x034, 'short') == nil)
+end
+
+-- Bare gil mode checks a fresh NPC Sparks balance before every purchase and
+-- stops normally below shield cost, without a hard-coded purchase target.
+do
+    local r, e = mock()
+    e.sparks = 8200
+    assert(r:start())
+    assert(r.auto == true and r.requested == nil)
+    poke(r, e)
+    assert(menu(r) == true)
+    assert(count_packet(e, 0x05B, 9) == 1)
+    e.shields = 1
+    e.used = e.used + 1
+    e.sparks = 5445
+    r:tick()
+    assert(r.completed == 1 and r:is_active())
+    poke(r, e)
+    assert(menu(r) == true)
+    assert(count_packet(e, 0x05B, 9) == 2)
+    e.shields = 2
+    e.used = e.used + 1
+    e.sparks = 2690
+    r:tick()
+    assert(r.completed == 2 and r:is_active())
+    poke(r, e)
+    assert(menu(r) == true)
+    assert(not r:is_active() and r.completed == 2 and e.ended == 1)
+    assert(count_packet(e, 0x05B, 9) == 2,
+        'unaffordable menu must not send a third purchase')
+    assert(e.messages[#e.messages]:find('Cannot afford another Acheron Shield'))
+end
+
+-- Already short of Sparks: no purchase, no retry, menu cleanly released.
+do
+    local r, e = mock()
+    e.sparks = 2754
+    assert(r:start())
+    poke(r, e)
+    assert(menu(r) == true)
+    assert(not r:is_active() and e.ended == 1)
+    assert(count_packet(e, 0x05B, 9) == 0)
+    assert(count_packet(e, 0x05B, 0) == 1)
+end
+
+-- Automatic mode fails closed when funds cannot be read from this menu.
+do
+    local r, e = mock()
+    e.sparks = nil
+    assert(r:start())
+    poke(r, e)
+    assert(menu(r) == true)
+    assert(not r:is_active() and e.ended == 1)
+    assert(count_packet(e, 0x05B, 9) == 0)
+end
+
+-- Fixed-count mode remains fixed, despite having more Sparks available.
+do
+    local r, e = mock()
+    assert(r:start(1))
+    assert(not r.auto and r.requested == 1)
+    poke(r, e)
+    assert(menu(r) == true)
+    e.shields = 1
+    e.used = e.used + 1
+    r:tick()
+    assert(r.completed == 1 and not r:is_active())
+    assert(count_packet(e, 0x05B, 9) == 1)
+end
+
+-- Exact affordability is allowed, but an unaffordable fixed-count purchase
+-- is stopped early when currency is available from the NPC menu.
+do
+    local r, e = mock()
+    e.sparks = 2755
+    assert(r:start())
+    poke(r, e)
+    assert(menu(r) == true)
+    assert(count_packet(e, 0x05B, 9) == 1)
+    e.shields = 1
+    e.used = e.used + 1
+    e.sparks = 0
+    r:tick()
+    poke(r, e)
+    assert(menu(r) == true)
+    assert(not r:is_active() and r.completed == 1)
 end
 
 print('gil_runner: all mocked transaction tests passed')
